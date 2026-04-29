@@ -3,7 +3,7 @@
 #include <unistd.h>
 #include <arpa/inet.h>
 #include <sys/socket.h>
-#include "cJSON.h"
+#include "protocol.h"
 
 #define SERVER_IP "106.12.26.151"
 #define SERVER_PORT 8000
@@ -41,86 +41,72 @@ int main(void)
 
 	printf("Connected.\n");
 
-	cJSON *online = cJSON_CreateObject();
-	cJSON_AddStringToObject(online, "cmd", "info");
-	cJSON_AddStringToObject(online, "deviceid", "0001");
-
-	char *json_str = cJSON_PrintUnformatted(online);
+	char *json_str = protocol_build_online_info("0001");
 	if (json_str != NULL) {
-        if (send(sockfd, json_str, strlen(json_str), 0) < 0) {
-            perror("send");
-            cJSON_free(json_str);
-            return -1;
-        }
+		if (send(sockfd, json_str, strlen(json_str), 0) < 0) {
+			perror("send");
+			protocol_free(json_str);
+			return -1;
+		}
 		printf("Send: %s\n", json_str);
-		cJSON_free(json_str);
+		protocol_free(json_str);
 	}
 
-	cJSON_Delete(online);
-
 	while (1) {
+		protocol_msg_t message;
+		protocol_parse_result_t parse_result;
+
 		memset(buf, 0, sizeof(buf));
-        int n = recv(sockfd, buf, sizeof(buf) - 1, 0);
+		int n = recv(sockfd, buf, sizeof(buf) - 1, 0);
 
 		if (n < 0) {
-            perror("recv");
+			perror("recv");
 			break;
 		} else if (n == 0) {
 			printf("Server closed connection.\n");
 			break;
 		}
 
-        buf[n] = '\0';
+		buf[n] = '\0';
 		printf("Recv: %s\n", buf);
 
-		cJSON *root = cJSON_Parse(buf);
-		if (root == NULL) {
+		parse_result = protocol_parse_message(buf, &message);
+		if (parse_result == PROTOCOL_PARSE_INVALID_JSON) {
 			printf("Invalid JSON\n");
 			return -1;
 		}
-
-		cJSON *cmd = cJSON_GetObjectItem(root, "cmd");
-		if (!cJSON_IsString(cmd)) {
+		if (parse_result == PROTOCOL_PARSE_INVALID_CMD) {
 			printf("JSON has no valid cmd field\n");
-			cJSON_Delete(root);
+			return -1;
+		}
+		if (parse_result == PROTOCOL_PARSE_INVALID_ACTION) {
+			printf("control message has no valid action field\n");
 			return -1;
 		}
 
-		if (strcmp(cmd->valuestring, "online_ok") == 0) {
-			cJSON *deviceid = cJSON_GetObjectItem(root, "deviceid");
-
-			if (cJSON_IsString(deviceid)) {
-				printf("Online success, deviceid=%s\n", deviceid->valuestring);
-			} else {
+		if (message.type == PROTOCOL_MSG_ONLINE_OK) {
+			if (message.deviceid[0] == '\0') {
 				printf("Online success\n");
+			} else {
+				printf("Online success, deviceid=%s\n", message.deviceid);
 			}
-		} else if (strcmp(cmd->valuestring, "control") == 0) {
-			cJSON *action = cJSON_GetObjectItem(root, "action");
+		} else if (message.type == PROTOCOL_MSG_CONTROL) {
+			printf("Control action: %s\n", message.action);
 
-			if (!cJSON_IsString(action)) {
-				printf("control message has no valid action field\n");
-				cJSON_Delete(root);
-				return -1;
-			}
-
-			printf("Control action: %s\n", action->valuestring);
-
-			if (strcmp(action->valuestring, "left") == 0) {
+			if (message.action_type == PROTOCOL_ACTION_LEFT) {
 				printf("TODO: motor left\n");
-			} else if (strcmp(action->valuestring, "right") == 0) {
+			} else if (message.action_type == PROTOCOL_ACTION_RIGHT) {
 				printf("TODO: motor right\n");
-			} else if (strcmp(action->valuestring, "up") == 0) {
+			} else if (message.action_type == PROTOCOL_ACTION_UP) {
 				printf("TODO: motor up\n");
-			} else if (strcmp(action->valuestring, "down") == 0) {
+			} else if (message.action_type == PROTOCOL_ACTION_DOWN) {
 				printf("TODO: motor down\n");
 			} else {
 				printf("Unknown action\n");
 			}
 		} else {
-			printf("Unknown cmd: %s\n", cmd->valuestring);
+			printf("Unknown cmd: %s\n", message.cmd);
 		}
-
-		cJSON_Delete(root);
 	}
 
 	close(sockfd);
