@@ -1,0 +1,45 @@
+---
+Language: Cpp
+BasedOnStyle: LLVM
+
+###################################
+#          indent conf
+###################################
+
+UseTab: ForIndentation
+IndentWidth: 4
+TabWidth: 4
+ColumnLimit: 100
+
+IndentPPDirectives: BeforeHash
+PPIndentWidth: -1
+
+IndentExternBlock: NoIndent
+
+###################################
+#          brace style
+###################################
+
+BreakBeforeBraces: Linux
+
+###################################
+#          other styles
+###################################
+
+AllowShortIfStatementsOnASingleLine: Never
+AllowShortLoopsOnASingleLine: false
+AllowShortBlocksOnASingleLine: Empty
+AllowShortFunctionsOnASingleLine: Inline
+
+IndentCaseLabels: false
+SortIncludes: false
+
+AlignConsecutiveAssignments: None
+AlignConsecutiveBitFields: None
+AlignConsecutiveMacros: None
+
+AlignTrailingComments:
+  Kind: Leave
+
+SpacesBeforeTrailingComments: 1
+MaxEmptyLinesToKeep: 1
