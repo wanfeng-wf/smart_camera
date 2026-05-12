@@ -3,7 +3,7 @@
 #include <unistd.h>
 #include <arpa/inet.h>
 #include <sys/socket.h>
-#include "protocol.h"
+#include "cJSON.h"
 
 #define SERVER_PORT 8000
 #define BUF_SIZE 1024
@@ -56,10 +56,7 @@ int main(void)
 	       ntohs(client_addr.sin_port));
 
 	while (1) {
-		protocol_msg_t message;
-		protocol_parse_result_t parse_result;
-
-		memset(buf, 0, sizeof(buf));
+        memset(buf, 0, sizeof(buf));
 		int n = recv(clientfd, buf, sizeof(buf) - 1, 0);
 		if (n < 0) {
 			perror("recv");
@@ -72,47 +69,69 @@ int main(void)
 		buf[n] = '\0';
 		printf("Recv: %s\n", buf);
 
-		parse_result = protocol_parse_message(buf, &message);
-		if (parse_result == PROTOCOL_PARSE_INVALID_JSON) {
+		cJSON *root = cJSON_Parse(buf);
+		if (root == NULL) {
 			printf("Invalid JSON\n");
 			return -1;
 		}
-		if (parse_result == PROTOCOL_PARSE_INVALID_CMD) {
+
+		cJSON *cmd = cJSON_GetObjectItem(root, "cmd");
+		if (!cJSON_IsString(cmd)) {
 			printf("JSON has no valid cmd field\n");
+			cJSON_Delete(root);
 			return -1;
 		}
 
-		if (message.type == PROTOCOL_MSG_INFO) {
-			const char *deviceid = message.deviceid;
+		if (strcmp(cmd->valuestring, "info") == 0) {
+			cJSON *deviceid = cJSON_GetObjectItem(root, "deviceid");
+			const char *deviceid_str = NULL;
 
-			printf("Device online, deviceid=%s\n", deviceid);
+			if (cJSON_IsString(deviceid)) {
+				deviceid_str = deviceid->valuestring;
+			}
 
-			char *reply_str = protocol_build_message("online_ok", "deviceid", deviceid);
+			printf("Device online, deviceid=%s\n", deviceid_str);
+
+			cJSON *reply = cJSON_CreateObject();
+			cJSON_AddStringToObject(reply, "cmd", "online_ok");
+			cJSON_AddStringToObject(reply, "deviceid", deviceid_str);
+
+			char *reply_str = cJSON_PrintUnformatted(reply);
 			if (reply_str) {
 				if (send(clientfd, reply_str, strlen(reply_str), 0) < 0) {
 					perror("send");
-					protocol_free(reply_str);
+					cJSON_free(reply_str);
 					continue;
 				}
 				printf("Send: %s\n", reply_str);
-				protocol_free(reply_str);
+				cJSON_free(reply_str);
 			}
+
+			cJSON_Delete(reply);
 
 			sleep(2);
 
-			char *control_str = protocol_build_message("control", "action", "left");
+			cJSON *control = cJSON_CreateObject();
+			cJSON_AddStringToObject(control, "cmd", "control");
+			cJSON_AddStringToObject(control, "action", "left");
+
+			char *control_str = cJSON_PrintUnformatted(control);
 			if (control_str) {
 				if (send(clientfd, control_str, strlen(control_str), 0) < 0) {
 					perror("send");
-					protocol_free(control_str);
+					cJSON_free(control_str);
 					continue;
 				}
 				printf("Send: %s\n", control_str);
-				protocol_free(control_str);
+				cJSON_free(control_str);
 			}
+
+			cJSON_Delete(control);
 		} else {
-			printf("Unknown cmd: %s\n", message.cmd);
+			printf("Unknown cmd: %s\n", cmd->valuestring);
 		}
+
+		cJSON_Delete(root);
 	}
 
 	close(clientfd);
