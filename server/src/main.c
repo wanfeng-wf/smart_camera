@@ -1,140 +1,106 @@
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
-#include <unistd.h>
-#include <arpa/inet.h>
+#include <sys/types.h>
 #include <sys/socket.h>
+#include <arpa/inet.h>
+#include <pthread.h>
+#include <unistd.h>
 #include "cJSON.h"
+#include "node.h"
+#include "camera.h"
+#include "app.h"
 
-#define SERVER_PORT 8000
-#define BUF_SIZE 1024
+#define SERVERPORT 8000
 
-int main(void)
+Node *head = NULL;
+
+int pic_length;
+unsigned int pic_id;
+pthread_mutex_t mutex;
+char *pic_data;
+
+void *ClientHandler(void *arg)
 {
-	int listenfd;
-	int clientfd;
-	struct sockaddr_in server_addr;
-	struct sockaddr_in client_addr;
-	socklen_t client_len = sizeof(client_addr);
-	char buf[BUF_SIZE];
+	int fd = *(int *)arg;
+	int recv_size;
+	char buf[256] = {0};
 
-	listenfd = socket(AF_INET, SOCK_STREAM, 0);
-	if (listenfd < 0) {
-		perror("socket");
-		return -1;
+	free(arg);
+	while (1) {
+		memset(buf, 0, sizeof(buf));
+		recv_size = recv(fd, buf, sizeof(buf) - 1, 0);
+		if (-1 == recv_size) {
+			perror("error");
+			break;
+		} else if (recv_size == 0) {
+			printf("客户端%d 异常下线\n", fd);
+			break;
+		}
+
+		printf("TCP收到数据 %s \n", buf);
+		cJSON *obj = cJSON_Parse(buf);
+		cJSON *val = cJSON_GetObjectItem(obj, "cmd");
+		const char *cmd = cJSON_GetStringValue(val);
+
+		if (!strcmp(cmd, "info")) {
+			camera_online(obj, fd);
+		} else if (!strcmp(cmd, "get_video_data")) {
+			app_send_video_data(fd);
+		} else if (!strcmp(cmd, "control")) {
+			app_send_control_info(obj);
+		}
+
+		cJSON_Delete(obj);
 	}
 
-	int opt = 1;
-	setsockopt(listenfd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+	return NULL;
+}
 
+int main()
+{
+	InitLink();
+	pic_data = (char *)malloc(BUFLEN);
+	pthread_mutex_init(&mutex, NULL);
+	int sockfd = socket(AF_INET, SOCK_STREAM, 0);
+	if (-1 == sockfd) {
+		perror("socket");
+		exit(1);
+	}
+	int opt = 1;//地址复用；
+	setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(int));
+
+	struct sockaddr_in server_addr;
 	memset(&server_addr, 0, sizeof(server_addr));
 	server_addr.sin_family = AF_INET;
-	server_addr.sin_port = htons(SERVER_PORT);
+	server_addr.sin_port = htons(SERVERPORT);
 	server_addr.sin_addr.s_addr = htonl(INADDR_ANY);
-
-	if (bind(listenfd, (struct sockaddr *)&server_addr, sizeof(server_addr)) < 0) {
-		perror("bind");
-		close(listenfd);
-		return -1;
+	if (bind(sockfd, (struct sockaddr *)&server_addr, sizeof(server_addr)) != 0) {
+		perror("bind error");
+		exit(1);
 	}
 
-	if (listen(listenfd, 10) < 0) {
-		perror("listen");
-		close(listenfd);
-		return -1;
+	if (listen(sockfd, 10) != 0) {
+		perror("listen error");
+		exit(1);
 	}
 
-	printf("Server listening on port %d ...\n", SERVER_PORT);
-
-	clientfd = accept(listenfd, (struct sockaddr *)&client_addr, &client_len);
-	if (clientfd < 0) {
-		perror("accept");
-		close(listenfd);
-		return -1;
-	}
-
-	printf("Client connected: %s:%d\n", inet_ntoa(client_addr.sin_addr),
-	       ntohs(client_addr.sin_port));
-
+	struct sockaddr_in client_addr;
+	socklen_t length = sizeof(client_addr);
 	while (1) {
-        memset(buf, 0, sizeof(buf));
-		int n = recv(clientfd, buf, sizeof(buf) - 1, 0);
-		if (n < 0) {
-			perror("recv");
-			break;
-		} else if (n == 0) {
-			printf("Client disconnected.\n");
-			break;
+		int *fd = malloc(sizeof(int));
+		*fd = accept(sockfd, (struct sockaddr *)&client_addr, &length);
+		if (*fd == -1) {
+			perror("accept error");
+			free(fd);
+			continue;
 		}
 
-		buf[n] = '\0';
-		printf("Recv: %s\n", buf);
-
-		cJSON *root = cJSON_Parse(buf);
-		if (root == NULL) {
-			printf("Invalid JSON\n");
-			return -1;
-		}
-
-		cJSON *cmd = cJSON_GetObjectItem(root, "cmd");
-		if (!cJSON_IsString(cmd)) {
-			printf("JSON has no valid cmd field\n");
-			cJSON_Delete(root);
-			return -1;
-		}
-
-		if (strcmp(cmd->valuestring, "info") == 0) {
-			cJSON *deviceid = cJSON_GetObjectItem(root, "deviceid");
-			const char *deviceid_str = NULL;
-
-			if (cJSON_IsString(deviceid)) {
-				deviceid_str = deviceid->valuestring;
-			}
-
-			printf("Device online, deviceid=%s\n", deviceid_str);
-
-			cJSON *reply = cJSON_CreateObject();
-			cJSON_AddStringToObject(reply, "cmd", "online_ok");
-			cJSON_AddStringToObject(reply, "deviceid", deviceid_str);
-
-			char *reply_str = cJSON_PrintUnformatted(reply);
-			if (reply_str) {
-				if (send(clientfd, reply_str, strlen(reply_str), 0) < 0) {
-					perror("send");
-					cJSON_free(reply_str);
-					continue;
-				}
-				printf("Send: %s\n", reply_str);
-				cJSON_free(reply_str);
-			}
-
-			cJSON_Delete(reply);
-
-			sleep(2);
-
-			cJSON *control = cJSON_CreateObject();
-			cJSON_AddStringToObject(control, "cmd", "control");
-			cJSON_AddStringToObject(control, "action", "left");
-
-			char *control_str = cJSON_PrintUnformatted(control);
-			if (control_str) {
-				if (send(clientfd, control_str, strlen(control_str), 0) < 0) {
-					perror("send");
-					cJSON_free(control_str);
-					continue;
-				}
-				printf("Send: %s\n", control_str);
-				cJSON_free(control_str);
-			}
-
-			cJSON_Delete(control);
-		} else {
-			printf("Unknown cmd: %s\n", cmd->valuestring);
-		}
-
-		cJSON_Delete(root);
+		pthread_t tid;
+		pthread_create(&tid, NULL, ClientHandler, (void *)fd);
+		pthread_detach(tid);
+		usleep(10000);
 	}
 
-	close(clientfd);
-	close(listenfd);
 	return 0;
 }

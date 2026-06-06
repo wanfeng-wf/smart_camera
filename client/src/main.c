@@ -1,128 +1,106 @@
 #include <stdio.h>
 #include <string.h>
-#include <unistd.h>
-#include <arpa/inet.h>
+#include <sys/types.h>
 #include <sys/socket.h>
+#include <pthread.h>
+#include <arpa/inet.h>
+#include <netinet/in.h>
+
+#include "video.h"
+#include "motor.h"
 #include "cJSON.h"
 
-#define SERVER_IP "106.12.26.151"
-#define SERVER_PORT 8000
-#define BUF_SIZE 1024
-
-int main(void)
+int main()
 {
+	if (start_mjpg_streamer() < 0) {
+		return -1;
+	}
+
+	// 第一步：创建客户端socket；
 	int sockfd;
-	struct sockaddr_in server_addr;
-	char buf[BUF_SIZE];
-
-	sockfd = socket(AF_INET, SOCK_STREAM, 0);
-	if (sockfd < 0) {
-		perror("socket");
+	if ((sockfd = socket(AF_INET, SOCK_STREAM, 0)) == -1) {
+		perror("sockfd error");
 		return -1;
 	}
 
-	memset(&server_addr, 0, sizeof(server_addr));
-	server_addr.sin_family = AF_INET;
-	server_addr.sin_port = htons(SERVER_PORT);
-
-	if (inet_pton(AF_INET, SERVER_IP, &server_addr.sin_addr) <= 0) {
-		perror("inet_pton");
-		close(sockfd);
+	// 第二步：向服务器发起连接请求
+	struct sockaddr_in myserveraddr;
+	// int port = atoi(argv[2]);
+	bzero(&myserveraddr, sizeof(myserveraddr));
+	myserveraddr.sin_family = AF_INET;
+	myserveraddr.sin_port = htons(SERVER_PORT);
+	inet_pton(AF_INET, SERVER_ADDR, &myserveraddr.sin_addr);
+	if (connect(sockfd, (struct sockaddr *)&myserveraddr, sizeof(myserveraddr)) != 0) {
+		perror("connect error");
 		return -1;
 	}
-
-	printf("Connecting to %s:%d ...\n", SERVER_IP, SERVER_PORT);
-
-	if (connect(sockfd, (struct sockaddr *)&server_addr, sizeof(server_addr)) < 0) {
-		perror("connect");
-		close(sockfd);
+	// 创建json对象
+	cJSON *obj = cJSON_CreateObject();
+	cJSON_AddStringToObject(obj, "cmd", "info");
+	cJSON_AddStringToObject(obj, "deviceid", "0001");// 简化直接写出
+	char *s = cJSON_PrintUnformatted(obj);
+	if (send(sockfd, s, strlen(s), 0) < 0) {
+		perror("send error");
+		cJSON_free(s);
+		cJSON_Delete(obj);
 		return -1;
 	}
+	cJSON_free(s);
+	cJSON_Delete(obj);
 
-	printf("Connected.\n");
-
-	cJSON *online = cJSON_CreateObject();
-	cJSON_AddStringToObject(online, "cmd", "info");
-	cJSON_AddStringToObject(online, "deviceid", "0001");
-
-	char *json_str = cJSON_PrintUnformatted(online);
-	if (json_str != NULL) {
-        if (send(sockfd, json_str, strlen(json_str), 0) < 0) {
-            perror("send");
-            cJSON_free(json_str);
-            return -1;
-        }
-		printf("Send: %s\n", json_str);
-		cJSON_free(json_str);
+	// 接收服务器的端口信息
+	char buf[256] = {0};
+	if (recv(sockfd, buf, sizeof(buf), 0) < 0) {
+		perror("recv error");
+		return -1;
 	}
+	cJSON *serverdata = cJSON_Parse(buf);
 
-	cJSON_Delete(online);
+	cJSON *cmd = NULL;
+	cJSON *port = NULL;
 
+	int server_udp_port;
+	cmd = cJSON_GetObjectItem(serverdata, "cmd");
+	port = cJSON_GetObjectItem(serverdata, "port");
+	if (cJSON_IsString(cmd) && !strcmp(cmd->valuestring, "port_info")) {
+		server_udp_port = port->valueint;
+		printf("recv port_info, udp port=%d\n", server_udp_port);
+	} else {
+		printf("recv error\n");
+	}
+	cJSON_Delete(serverdata);
+	// 创建一个线程，通过send_video_data 函数发送视频数据；该函数需要知道udp的端口号
+	pthread_t tid;
+	pthread_create(&tid, NULL, send_video_data, &server_udp_port);
+	pthread_detach(tid);
 	while (1) {
-		memset(buf, 0, sizeof(buf));
-        int n = recv(sockfd, buf, sizeof(buf) - 1, 0);
-
-		if (n < 0) {
-            perror("recv");
-			break;
-		} else if (n == 0) {
-			printf("Server closed connection.\n");
-			break;
+		bzero(buf, sizeof(buf));
+		if (recv(sockfd, buf, sizeof(buf), 0) < 0) {
+			perror("recv error\n");
 		}
+		serverdata = cJSON_Parse(buf);
 
-        buf[n] = '\0';
-		printf("Recv: %s\n", buf);
+		cJSON *cmd = NULL;
+		cJSON *action = NULL;
 
-		cJSON *root = cJSON_Parse(buf);
-		if (root == NULL) {
-			printf("Invalid JSON\n");
-			return -1;
-		}
+		cmd = cJSON_GetObjectItem(serverdata, "cmd");
+		action = cJSON_GetObjectItem(serverdata, "action");
 
-		cJSON *cmd = cJSON_GetObjectItem(root, "cmd");
-		if (!cJSON_IsString(cmd)) {
-			printf("JSON has no valid cmd field\n");
-			cJSON_Delete(root);
-			return -1;
-		}
-
-		if (strcmp(cmd->valuestring, "online_ok") == 0) {
-			cJSON *deviceid = cJSON_GetObjectItem(root, "deviceid");
-
-			if (cJSON_IsString(deviceid)) {
-				printf("Online success, deviceid=%s\n", deviceid->valuestring);
-			} else {
-				printf("Online success\n");
+		if (cJSON_IsString(cmd) && !strcmp(cmd->valuestring, "control")) {
+			const char *act = action->valuestring;
+			if (!strcmp(act, "left")) {
+				// 调动相应的函数让舵机转动起来
+				motor_turn_left();
+			} else if (!strcmp(act, "right")) {
+				motor_turn_right();
+			} else if (!strcmp(act, "up")) {
+				motor_turn_up();
+			} else if (!strcmp(act, "down")) {
+				motor_turn_down();
 			}
-		} else if (strcmp(cmd->valuestring, "control") == 0) {
-			cJSON *action = cJSON_GetObjectItem(root, "action");
-
-			if (!cJSON_IsString(action)) {
-				printf("control message has no valid action field\n");
-				cJSON_Delete(root);
-				return -1;
-			}
-
-			printf("Control action: %s\n", action->valuestring);
-
-			if (strcmp(action->valuestring, "left") == 0) {
-				printf("TODO: motor left\n");
-			} else if (strcmp(action->valuestring, "right") == 0) {
-				printf("TODO: motor right\n");
-			} else if (strcmp(action->valuestring, "up") == 0) {
-				printf("TODO: motor up\n");
-			} else if (strcmp(action->valuestring, "down") == 0) {
-				printf("TODO: motor down\n");
-			} else {
-				printf("Unknown action\n");
-			}
-		} else {
-			printf("Unknown cmd: %s\n", cmd->valuestring);
 		}
-
-		cJSON_Delete(root);
+		cJSON_Delete(serverdata);
 	}
-
-	close(sockfd);
+	stop_mjpg_streamer();
 	return 0;
 }
