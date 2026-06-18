@@ -67,7 +67,9 @@ int main()
 		perror("socket");
 		exit(1);
 	}
-	int opt = 1;//地址复用；
+
+	// 地址复用
+	int opt = 1;
 	setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(int));
 
 	struct sockaddr_in server_addr;

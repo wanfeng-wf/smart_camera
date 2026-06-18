@@ -12,9 +12,7 @@ struct Node
 typedef struct Node Node;
 
 int InitLink();
-
 int InsertLink(const char*id,int fd);
-
 int TraverseLink(const char* id);
 
 #endif

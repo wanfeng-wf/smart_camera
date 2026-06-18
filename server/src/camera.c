@@ -13,6 +13,7 @@ extern char *pic_data;
 extern int pic_length;
 extern unsigned int pic_id;
 
+// 接收摄像头数据
 void *camera_video_data(void *arg)
 {
 	int video_port = *(int *)arg;
@@ -115,6 +116,7 @@ void camera_online(cJSON *json, int fd)
 	const char *dev_id = cJSON_GetStringValue(val);
 	InsertLink(dev_id, fd);
 
+	// 返回板端上传摄像头数据的UDP端口信息
 	cJSON *obj = cJSON_CreateObject();
 	cJSON_AddStringToObject(obj, "cmd", "port_info");
 	cJSON_AddNumberToObject(obj, "port", video_port);

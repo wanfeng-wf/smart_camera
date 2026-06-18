@@ -16,16 +16,15 @@ int main()
 		return -1;
 	}
 
-	// 第一步：创建客户端socket；
+	// 创建客户端socket；
 	int sockfd;
 	if ((sockfd = socket(AF_INET, SOCK_STREAM, 0)) == -1) {
 		perror("sockfd error");
 		return -1;
 	}
 
-	// 第二步：向服务器发起连接请求
+	// 向服务器发起tcp连接请求
 	struct sockaddr_in myserveraddr;
-	// int port = atoi(argv[2]);
 	bzero(&myserveraddr, sizeof(myserveraddr));
 	myserveraddr.sin_family = AF_INET;
 	myserveraddr.sin_port = htons(SERVER_PORT);
@@ -34,10 +33,11 @@ int main()
 		perror("connect error");
 		return -1;
 	}
+
 	// 创建json对象
 	cJSON *obj = cJSON_CreateObject();
 	cJSON_AddStringToObject(obj, "cmd", "info");
-	cJSON_AddStringToObject(obj, "deviceid", "0001");// 简化直接写出
+	cJSON_AddStringToObject(obj, "deviceid", "0001");
 	char *s = cJSON_PrintUnformatted(obj);
 	if (send(sockfd, s, strlen(s), 0) < 0) {
 		perror("send error");
@@ -69,10 +69,13 @@ int main()
 		printf("recv error\n");
 	}
 	cJSON_Delete(serverdata);
-	// 创建一个线程，通过send_video_data 函数发送视频数据；该函数需要知道udp的端口号
+
+	// 创建一个线程，向服务器返回的udp端口发送视频数据
 	pthread_t tid;
 	pthread_create(&tid, NULL, send_video_data, &server_udp_port);
 	pthread_detach(tid);
+	
+	// 接收并执行服务器返回的控制指令
 	while (1) {
 		bzero(buf, sizeof(buf));
 		if (recv(sockfd, buf, sizeof(buf), 0) < 0) {
