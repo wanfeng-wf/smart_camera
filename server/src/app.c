@@ -20,6 +20,7 @@ void *app_video_data(void *arg)
 	int app_port = *(int *)arg;
 	unsigned int frame_id = 1;
 	unsigned int last_pic_id = 0;
+	unsigned int send_count = 0;
 	free(arg);
 
 	// 创建udp socket
@@ -61,6 +62,7 @@ void *app_video_data(void *arg)
 
 		if (send_len > 0 && current_pic_id != last_pic_id) {
 			int offset = 0;
+			int packet_count = (send_len + UDP_DATA_SIZE - 1) / UDP_DATA_SIZE;
 
 			while (offset < send_len) {
 				unsigned char packet[sizeof(struct jpeg_udp_head) + UDP_DATA_SIZE];
@@ -86,13 +88,18 @@ void *app_video_data(void *arg)
 				}
 
 				offset += data_size;
-				usleep(1000);
+				usleep(APP_PACKET_DELAY_US);
 			}
 
+			send_count++;
+			if (send_count % 30 == 0) {
+				printf("发送图片到app frame=%u size=%d packets=%d pic_id=%u\n",
+				       frame_id, send_len, packet_count, current_pic_id);
+			}
 			frame_id++;
 			last_pic_id = current_pic_id;
 		}
-		usleep(150000);
+		usleep(APP_SEND_INTERVAL_US);
 	}
 }
 

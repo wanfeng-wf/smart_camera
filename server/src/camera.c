@@ -5,6 +5,7 @@
 #include <sys/socket.h>
 #include <arpa/inet.h>
 #include <pthread.h>
+#include <time.h>
 #include "node.h"
 #include "camera.h"
 
@@ -12,6 +13,14 @@ extern pthread_mutex_t mutex;
 extern char *pic_data;
 extern int pic_length;
 extern unsigned int pic_id;
+
+static long long get_time_ms(void)
+{
+	struct timespec ts;
+
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	return (long long)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+}
 
 // 接收摄像头数据
 void *camera_video_data(void *arg)
@@ -43,9 +52,13 @@ void *camera_video_data(void *arg)
 	int count = 0;
 	unsigned char packet[sizeof(struct jpeg_udp_head) + UDP_DATA_SIZE];
 	char *frame_buf = (char *)malloc(BUFLEN);
+	unsigned char *packet_recv = (unsigned char *)calloc((BUFLEN + UDP_DATA_SIZE - 1) / UDP_DATA_SIZE, 1);
 	unsigned int cur_frame_id = 0;
 	unsigned int cur_frame_size = 0;
 	unsigned int frame_recv_size = 0;
+	unsigned int packet_count = 0;
+	unsigned int recv_packet_count = 0;
+	long long frame_start_ms = 0;
 
 	printf("准备接收视频数据, port=%d\n", video_port);
 	while (1) {
@@ -67,24 +80,47 @@ void *camera_video_data(void *arg)
 
 		if (head.magic != UDP_MAGIC || head.frame_size > BUFLEN ||
 		    head.data_size > UDP_DATA_SIZE ||
-		    recv_size != (int)(sizeof(head) + head.data_size)) {
+		    recv_size != (int)(sizeof(head) + head.data_size) ||
+		    head.offset + head.data_size > head.frame_size ||
+		    head.offset % UDP_DATA_SIZE != 0) {
 			continue;
 		}
 
-		if (head.offset == 0) {
+		long long now_ms = get_time_ms();
+		if (cur_frame_size > 0 && head.frame_id == cur_frame_id &&
+		    now_ms - frame_start_ms > FRAME_TIMEOUT_MS) {
+			cur_frame_size = 0;
+			frame_recv_size = 0;
+			recv_packet_count = 0;
+			continue;
+		}
+
+		if (head.frame_id != cur_frame_id) {
+			if (head.frame_id < cur_frame_id) {
+				continue;
+			}
 			cur_frame_id = head.frame_id;
 			cur_frame_size = head.frame_size;
 			frame_recv_size = 0;
+			packet_count = (head.frame_size + UDP_DATA_SIZE - 1) / UDP_DATA_SIZE;
+			recv_packet_count = 0;
+			memset(packet_recv, 0, (BUFLEN + UDP_DATA_SIZE - 1) / UDP_DATA_SIZE);
+			frame_start_ms = now_ms;
 		}
 
-		if (head.frame_id != cur_frame_id || head.offset != frame_recv_size) {
+		unsigned int packet_index = head.offset / UDP_DATA_SIZE;
+		if (head.frame_size != cur_frame_size || packet_index >= packet_count) {
 			continue;
 		}
 
-		memcpy(frame_buf + frame_recv_size, packet + sizeof(head), head.data_size);
-		frame_recv_size += head.data_size;
+		if (packet_recv[packet_index] == 0) {
+			memcpy(frame_buf + head.offset, packet + sizeof(head), head.data_size);
+			packet_recv[packet_index] = 1;
+			frame_recv_size += head.data_size;
+			recv_packet_count++;
+		}
 
-		if (frame_recv_size < cur_frame_size) {
+		if (frame_recv_size < cur_frame_size || recv_packet_count < packet_count) {
 			continue;
 		}
 
@@ -98,7 +134,9 @@ void *camera_video_data(void *arg)
 		if (count % 30 == 0) {
 			printf("收到完整图片 %u\n", cur_frame_size);
 		}
+		cur_frame_size = 0;
 		frame_recv_size = 0;
+		recv_packet_count = 0;
 	}
 
 	return NULL;

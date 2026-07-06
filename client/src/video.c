@@ -53,65 +53,106 @@ void stop_mjpg_streamer(void)
 	mjpg_pid = -1;
 }
 
-static int read_line(int fd, char *buf, int size)
+static char *find_bytes(char *buf, int len, const char *needle, int needle_len)
 {
-	int i = 0;
-	char c;
+	int i;
 
-	while (i < size - 1) {
-		int n = recv(fd, &c, 1, 0);
-		if (n <= 0) {
-			return n;
-		}
-
-		buf[i++] = c;
-		if (c == '\n') {
-			break;
+	for (i = 0; i <= len - needle_len; i++) {
+		if (memcmp(buf + i, needle, needle_len) == 0) {
+			return buf + i;
 		}
 	}
 
-	buf[i] = '\0';
-	return i;
+	return NULL;
 }
 
-static int read_jpeg_frame(int fd, char *jpeg_buf, int jpeg_buf_size, int *jpeg_size)
+static int fill_mjpeg_reader(struct mjpeg_reader *reader)
 {
-	char line[256];
-	int content_length = 0;
-	int recv_size = 0;
+	int n;
 
-	// 先读到一个空行：第一次是HTTP响应头，后面是上一帧后的分隔行
-	while (read_line(fd, line, sizeof(line)) > 0) {
-		if (strcmp(line, "\r\n") == 0) {
-			break;
-		}
-	}
-
-	// 再读这一帧的MJPEG头，找到Content-Length
-	while (read_line(fd, line, sizeof(line)) > 0) {
-		if (strncmp(line, "Content-Length:", 15) == 0) {
-			content_length = atoi(line + 15);
-		}
-
-		if (strcmp(line, "\r\n") == 0) {
-			break;
-		}
-	}
-
-	if (content_length <= 0 || content_length > jpeg_buf_size) {
+	if (reader->len >= reader->size) {
 		return -1;
 	}
 
-	while (recv_size < content_length) {
-		int n = recv(fd, jpeg_buf + recv_size, content_length - recv_size, 0);
-		if (n <= 0) {
-			return -1;
-		}
-		recv_size += n;
+	n = recv(reader->fd, reader->buf + reader->len,
+	         reader->size - reader->len, 0);
+	if (n <= 0) {
+		return -1;
 	}
 
-	*jpeg_size = content_length;
+	reader->len += n;
+	return n;
+}
+
+static void consume_mjpeg_reader(struct mjpeg_reader *reader, int len)
+{
+	if (len >= reader->len) {
+		reader->len = 0;
+		return;
+	}
+
+	memmove(reader->buf, reader->buf + len, reader->len - len);
+	reader->len -= len;
+}
+
+static int parse_content_length(char *header, int header_len)
+{
+	char *pos;
+	char *end = header + header_len;
+
+	for (pos = header; pos < end; pos++) {
+		if (end - pos < 15) {
+			break;
+		}
+
+		if (strncmp(pos, "Content-Length:", 15) == 0) {
+			return atoi(pos + 15);
+		}
+	}
+
 	return 0;
+}
+
+static int read_jpeg_frame(struct mjpeg_reader *reader, char *jpeg_buf,
+                           int jpeg_buf_size, int *jpeg_size)
+{
+	while (1) {
+		char *header_end;
+		int header_len;
+		int content_length;
+		int frame_end;
+
+		header_end = find_bytes(reader->buf, reader->len, "\r\n\r\n", 4);
+		while (header_end == NULL) {
+			if (fill_mjpeg_reader(reader) < 0) {
+				return -1;
+			}
+			header_end = find_bytes(reader->buf, reader->len, "\r\n\r\n", 4);
+		}
+
+		header_len = header_end - reader->buf + 4;
+		content_length = parse_content_length(reader->buf, header_len);
+		if (content_length <= 0) {
+			consume_mjpeg_reader(reader, header_len);
+			continue;
+		}
+
+		if (content_length > jpeg_buf_size) {
+			return -1;
+		}
+
+		frame_end = header_len + content_length;
+		while (reader->len < frame_end) {
+			if (fill_mjpeg_reader(reader) < 0) {
+				return -1;
+			}
+		}
+
+		memcpy(jpeg_buf, reader->buf + header_len, content_length);
+		consume_mjpeg_reader(reader, frame_end);
+		*jpeg_size = content_length;
+		return 0;
+	}
 }
 
 void *send_video_data(void *arg)
@@ -166,14 +207,28 @@ void *send_video_data(void *arg)
 		exit(1);
 	}
 
+	struct mjpeg_reader reader;
+	reader.fd = video_sockfd;
+	reader.buf = (char *)malloc(MJPEG_RECV_BUF_SIZE);
+	if (reader.buf == NULL) {
+		perror("malloc mjpeg reader");
+		close(server_sockfd);
+		close(video_sockfd);
+		free(buf);
+		return NULL;
+	}
+	reader.len = 0;
+	reader.size = MJPEG_RECV_BUF_SIZE;
+
 	int recv_size;
 	unsigned int frame_id = 1;
 	while (1) {
 		// 读取一帧图片
-		if (read_jpeg_frame(video_sockfd, buf, BUFLEN, &recv_size) < 0) {
+		if (read_jpeg_frame(&reader, buf, BUFLEN, &recv_size) < 0) {
 			printf("read jpeg frame failed\n");
 			break;
 		}
+		printf("read jpeg frame success, size: %d\n", recv_size);
 
 		//将一帧图片分片发送给服务器
 		int offset = 0;
@@ -208,6 +263,7 @@ void *send_video_data(void *arg)
 
 	close(server_sockfd);
 	close(video_sockfd);
+	free(reader.buf);
 	free(buf);
 	return NULL;
 }
